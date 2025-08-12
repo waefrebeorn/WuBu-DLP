@@ -81,13 +81,13 @@ class YtDownloaderApp(ttk.Frame):
         self.start_button = ttk.Button(self, text="Start Download", command=self.start_download_thread, style="Accent.TButton")
         self.start_button.pack(fill=tk.X, pady=10, ipady=5)
         
-        # --- NEW STATUS BAR ---
+        # --- STATUS BAR ---
         status_frame = ttk.Frame(self, padding=(0, 0, 0, 5))
         status_frame.pack(fill=tk.X)
         self.status_label = ttk.Label(status_frame, text="Status: Idle", anchor='w')
         self.status_label.pack(fill=tk.X)
 
-        # --- CLEAN LOG WINDOW ---
+        # --- EVENT LOG ---
         log_frame = ttk.LabelFrame(self, text="Event Log", padding="10")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         self.log_text = tk.Text(log_frame, state='disabled', wrap='word', bg="#fdfdfd", fg="#333333", font=("Courier New", 9))
@@ -102,7 +102,6 @@ class YtDownloaderApp(ttk.Frame):
                 self.queue_listbox.insert(tk.END, url.strip())
         self.on_entry_focus_out(None)
     
-    # --- NEW THREAD-SAFE STATUS UPDATE METHOD ---
     def update_status(self, text):
         self.parent.after(0, lambda: self.status_label.config(text=text))
 
@@ -113,7 +112,6 @@ class YtDownloaderApp(ttk.Frame):
             self.log(f"--- Starting download for: {url} ---")
             
             ydl_opts = {
-                'outtmpl': os.path.join(self.download_path, '%(title)s - [%(id)s].%(ext)s'),
                 'cookiefile': self.cookie_file_path,
                 'progress_hooks': [self.my_hook],
                 'logger': self.MyLogger(self),
@@ -121,12 +119,15 @@ class YtDownloaderApp(ttk.Frame):
             }
 
             if self.merge_var.get():
+                # MERGE MODE: Add [MERGED] to the filename for clarity and uniqueness.
                 self.log("[OPTIONS] Merge Mode enabled. Creating single output file.")
                 ydl_opts['format'] = 'bv*+ba/b'
+                ydl_opts['outtmpl'] = os.path.join(self.download_path, '%(title)s - [%(id)s] [MERGED].%(ext)s')
             else:
+                # SPLIT MODE: Add format_id to filename for unique streams.
                 self.log("[OPTIONS] Split Mode enabled. Saving separate video and audio files.")
                 ydl_opts['format'] = 'bv*,ba'
-                ydl_opts['keepvideo'] = True
+                ydl_opts['outtmpl'] = os.path.join(self.download_path, '%(title)s - [%(id)s] [%(format_id)s].%(ext)s')
 
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -137,6 +138,21 @@ class YtDownloaderApp(ttk.Frame):
                 self.update_status(f"Status: Error occurred on {url}")
         
         self.parent.after(0, self.download_finished)
+
+    def my_hook(self, d):
+        if d['status'] == 'downloading':
+            percent = d.get('_percent_str', 'N/A')
+            speed = d.get('_speed_str', 'N/A')
+            eta = d.get('_eta_str', 'N/A')
+            status_text = f"Status: Downloading... {percent.strip()} at {speed.strip()} (ETA: {eta.strip()})"
+            self.update_status(status_text)
+        elif d['status'] == 'finished':
+            self.log(f" > Download of stream complete: {os.path.basename(d['filename'])}")
+            if self.merge_var.get():
+                self.update_status("Status: Merging formats...")
+        elif d['status'] == 'error':
+            self.log(f" > ERROR: {d.get('error', 'Unknown yt-dlp error')}")
+            self.update_status(f"Status: Error occurred")
 
     def select_cookie_file(self):
         path = filedialog.askopenfilename(title="Select your cookies.txt file", filetypes=[("Text files", "*.txt")])
@@ -197,7 +213,7 @@ class YtDownloaderApp(ttk.Frame):
         
         self.is_downloading = True
         self.start_button.config(text="Downloading...", state='disabled')
-        self.update_status("Status: Preparing download...") # Update status bar
+        self.update_status("Status: Preparing download...")
         download_thread = threading.Thread(target=self.process_queue, daemon=True)
         download_thread.start()
 
@@ -206,27 +222,8 @@ class YtDownloaderApp(ttk.Frame):
         self.start_button.config(text="Start Download", state='normal')
         self.queue_listbox.delete(0, tk.END)
         self.log("====== All downloads complete! Queue Cleared. ======")
-        self.update_status("Status: All downloads complete!") # Update status bar
+        self.update_status("Status: All downloads complete!")
         messagebox.showinfo("Success", "All items in the queue have been processed.")
-
-    def my_hook(self, d):
-        if d['status'] == 'downloading':
-            # --- THIS NOW UPDATES THE STATUS BAR, NOT THE LOG ---
-            percent = d.get('_percent_str', 'N/A')
-            speed = d.get('_speed_str', 'N/A')
-            eta = d.get('_eta_str', 'N/A')
-            status_text = f"Status: Downloading... {percent.strip()} at {speed.strip()} (ETA: {eta.strip()})"
-            self.update_status(status_text)
-        elif d['status'] == 'finished':
-            # This is an event, so it stays in the log
-            if not self.merge_var.get() and d.get('keepvideo'):
-                 self.log(f" > Download of stream complete: {os.path.basename(d['filename'])}")
-            else:
-                 self.log(f" > Download finished. Now merging formats...")
-                 self.update_status("Status: Merging formats...")
-        elif d['status'] == 'error':
-            self.log(f" > ERROR: {d.get('error', 'Unknown yt-dlp error')}")
-            self.update_status(f"Status: Error occurred")
             
     class MyLogger:
         def __init__(self, app_instance): self.app = app_instance
@@ -235,6 +232,10 @@ class YtDownloaderApp(ttk.Frame):
         def info(self, msg):
             if '[youtube]' in msg and 'Downloading webpage' in msg:
                 self.app.update_status("Status: Analyzing video URL...")
+            elif '[Merger]' in msg:
+                self.app.log(msg)
+            elif 'Destination:' in msg:
+                pass
             else:
                 self.app.log(f"{msg}")
         def warning(self, msg): self.app.log(f"[WARNING] {msg}")
